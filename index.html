@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebAssembly Simple Example</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        input, button { padding: 8px; margin: 5px; }
+        #output { margin-top: 15px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>WebAssembly C Function Call</h1>
+
+    <input type="number" id="num1" value="10">
+    <input type="number" id="num2" value="5">
+    <br>
+    <button id="addButton">Add (Wasm)</button>
+    <button id="subtractButton">Subtract (Wasm)</button>
+
+    <div id="output">Result will appear here...</div>
+
+    <!-- DEFINE Module FIRST -->
+    <script>
+        const num1Input = document.getElementById('num1');
+        const num2Input = document.getElementById('num2');
+        const addButton = document.getElementById('addButton');
+        const subtractButton = document.getElementById('subtractButton');
+        const outputDiv = document.getElementById('output');
+
+        let wasmAdd, wasmSubtract; // To hold our wrapped Wasm functions
+
+        // Define the Module object *before* loading math.js
+        // Emscripten's glue code will look for this object.
+        var Module = {
+            onRuntimeInitialized: function() {
+                console.log('Wasm Runtime Initialized!');
+
+                // Use cwrap to create easy-to-use JavaScript wrappers
+                wasmAdd = Module.cwrap('add', 'number', ['number', 'number']);
+                wasmSubtract = Module.cwrap('subtract', 'number', ['number', 'number']);
+
+                // Enable buttons now that Wasm functions are ready
+                addButton.disabled = false;
+                subtractButton.disabled = false;
+                outputDiv.textContent = 'Wasm Ready! Enter numbers and click a button.';
+            }
+            // You can add other Module customization options here if needed
+            // e.g., preRun: [], postRun: [], etc.
+        };
+
+        // --- Event Listeners (can be defined here or after loading math.js) ---
+         addButton.addEventListener('click', () => {
+            if (!wasmAdd) { // Check if function is ready
+                outputDiv.textContent = 'Wasm function not ready yet.';
+                return;
+            }
+            const num1 = parseInt(num1Input.value, 10);
+            const num2 = parseInt(num2Input.value, 10);
+            const result = wasmAdd(num1, num2); // Call the Wasm function!
+            outputDiv.textContent = `Wasm Add Result: ${num1} + ${num2} = ${result}`;
+        });
+
+        subtractButton.addEventListener('click', () => {
+             if (!wasmSubtract) { // Check if function is ready
+                outputDiv.textContent = 'Wasm function not ready yet.';
+                return;
+            }
+            const num1 = parseInt(num1Input.value, 10);
+            const num2 = parseInt(num2Input.value, 10);
+            const result = wasmSubtract(num1, num2); // Call the Wasm function!
+            outputDiv.textContent = `Wasm Subtract Result: ${num1} - ${num2} = ${result}`;
+        });
+
+         // Disable buttons initially until Wasm is loaded and runtime initialized
+        addButton.disabled = true;
+        subtractButton.disabled = true;
+
+    </script>
+
+    <!-- THEN load the Emscripten JS glue code -->
+    <!-- It will find the Module object defined above -->
+    <script src="math.js"></script>
+
+</body>
+</html>
