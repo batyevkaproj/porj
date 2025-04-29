@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Wasm Image Grayscale (User Input)</title>
+    <title>Wasm Image Grayscale (Pthreads)</title>
     <style>
         body { font-family: sans-serif; padding: 1em; }
         .container { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
@@ -33,11 +33,17 @@
         }
         label.file-button:hover { background-color: #0056b3; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
-
+        .controls span { margin-left: 15px; }
     </style>
+    <!-- IMPORTANT: Add headers for SharedArrayBuffer -->
+    <!-- These might need to be set by your server instead if meta tags don't work reliably -->
+    <!-- <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin"> -->
+    <!-- <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp"> -->
+
 </head>
 <body>
-    <h1>Image Grayscale with WebAssembly</h1>
+    <h1>Image Grayscale with WebAssembly (Pthreads)</h1>
+    <p style="color: red; font-weight: bold;">Note: This requires a server sending COOP/COEP headers for SharedArrayBuffer!</p>
 
     <div id="dropZone">
         <p>Drag & Drop an image here, or use the button below.</p>
@@ -45,8 +51,9 @@
 
     <div class="controls">
         <label for="fileInput" class="file-button">Select Image File</label>
-        <input type="file" id="fileInput" accept="image/*"> <!-- Accept only image types -->
-        <button id="processButton" disabled>Apply Grayscale (Wasm)</button>
+        <input type="file" id="fileInput" accept="image/*">
+        <button id="processButton" disabled>Apply Grayscale (Wasm Pthreads)</button>
+        <span id="threadInfo">Threads: Detecting...</span> <!-- Info display -->
         <p id="status">Select or drop an image to begin.</p>
     </div>
 
@@ -71,42 +78,36 @@
         const status = document.getElementById('status');
         const fileInput = document.getElementById('fileInput');
         const dropZone = document.getElementById('dropZone');
+        const threadInfo = document.getElementById('threadInfo');
 
-        let wasm_apply_grayscale;
-        let originalImageData; // To store pixel data from the loaded image
+        let wasm_apply_grayscale_pthread; // Renamed function
+        let originalImageData;
         let wasmReady = false;
+        // Default to 4 threads if navigator.hardwareConcurrency is unavailable or 0
+        let numThreads = navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : 4;
 
-         // --- Emscripten Module Setup (Define BEFORE loading image.js) ---
+
+         // --- Emscripten Module Setup ---
         var Module = {
             onRuntimeInitialized: function() {
-                console.log('(index):82 Wasm Runtime Initialized!'); // Match console line number roughly
+                console.log('Wasm Pthread Runtime Initialized!');
                 try {
-                    wasm_apply_grayscale = Module.cwrap(
-                        'apply_grayscale', // C function name
+                    // Wrap the PTHREAD version
+                    wasm_apply_grayscale_pthread = Module.cwrap(
+                        'apply_grayscale_pthread', // C function name
                         null,              // Return type (void)
-                        ['number', 'number', 'number'] // Args: ptr, width, height
+                        ['number', 'number', 'number', 'number'] // Args: ptr, width, height, num_threads
                     );
 
-                    // *** Add check right after initialization ***
-                    console.log("Checking Module components immediately after init:");
-                    console.log("  Module._malloc exists:", !!Module._malloc);
-                    console.log("  Module._free exists:", !!Module._free);
-                    console.log("  Module.HEAPU8 exists:", !!Module.HEAPU8);
-                    console.log("  Module.HEAPU8.buffer exists:", !!(Module.HEAPU8 && Module.HEAPU8.buffer));
-                    // console.log("  Module.wasmMemory exists:", !!Module.wasmMemory); // Keep commented unless needed
-                    // console.log("  Module.wasmMemory.buffer exists:", !!(Module.wasmMemory && Module.wasmMemory.buffer)); // Keep commented unless needed
-
-                    if (!Module._malloc || !Module._free || !Module.HEAPU8 || !Module.HEAPU8.buffer) {
-                         console.error("FATAL: Core Module components missing immediately after init!");
-                         status.textContent = "Error: Wasm initialization incomplete.";
-                         wasmReady = false; // Ensure it stays false
-                         return; // Stop further setup
+                    // Check components (optional, good practice)
+                    if (!Module._malloc || !Module._free || !Module.HEAPU8 || !Module.HEAPU8.buffer || !wasm_apply_grayscale_pthread) {
+                         throw new Error("Core Module components or wrapped function missing after init!");
                     }
 
                     wasmReady = true;
                     console.log("Wasm components look OK after init.");
+                    threadInfo.textContent = `Threads: ${numThreads}`; // Update UI
 
-                    // Check if an image was already loaded before Wasm was ready
                     if (originalImageData) {
                         processButton.disabled = false;
                         status.textContent = "Ready to process.";
@@ -117,73 +118,41 @@
                      console.error("Error during Wasm initialization or cwrap:", initError);
                      status.textContent = "Error initializing Wasm module.";
                      wasmReady = false;
+                     threadInfo.textContent = `Threads: Error`;
                 }
             },
-             // Optional: Add error handling for module loading itself
-            printErr: function(text) {
-                 console.error("Emscripten printErr:", text);
-                 // Update status only if it's a critical loading error maybe
-                 // status.textContent = "Error loading Wasm: " + text;
-            },
-            setStatus: function(text) {
-                 // You could potentially hook into Emscripten's status updates here
-                 // console.log("Emscripten setStatus:", text);
-                 if (text.includes("downloading data") || text.includes("prepare")) {
-                     status.textContent = "Initializing Wasm (" + text + ")...";
-                 }
-            }
+             printErr: function(text) {
+                console.error("Emscripten printErr:", text);
+                // Display critical errors related to threading/SharedArrayBuffer
+                if (text.includes("requires Cross-Origin Isolation")) {
+                     status.innerHTML = '<strong style="color: red;">Error: Server missing COOP/COEP headers required for multithreading.</strong>';
+                }
+             },
+             setStatus: function(text) { if (text) { console.log("Emscripten status:", text); } } // Log status messages
         };
 
         // --- Core Image Loading Logic ---
         function loadImageFromFile(file) {
             if (!file || !file.type.startsWith('image/')) {
-                status.textContent = "Error: Please select an image file.";
-                console.error("Invalid file type selected:", file ? file.type : 'none');
-                return;
+                status.textContent = "Error: Please select an image file."; console.error("Invalid file type selected:", file ? file.type : 'none'); return;
             }
-
-            status.textContent = "Loading image...";
-            originalImageData = null; // Reset previous data
-            processButton.disabled = true; // Disable while loading new image
-
+            status.textContent = "Loading image..."; originalImageData = null; processButton.disabled = true;
             const reader = new FileReader();
-
             reader.onload = function(e) {
                 const tempImg = new Image();
                 tempImg.onload = function() {
-                    // Image successfully decoded by the browser
-                    console.log('(index):120 Image decoded. Dimensions:', tempImg.naturalWidth, tempImg.naturalHeight); // Match console line
-                    status.textContent = "Image loaded.";
-
-                    const canvasWidth = canvasOriginal.width;
-                    const canvasHeight = canvasOriginal.height;
-                    ctxOriginal.clearRect(0, 0, canvasWidth, canvasHeight);
-                    ctxWasm.clearRect(0, 0, canvasWidth, canvasHeight);
+                    status.textContent = "Image loaded."; console.log("Image decoded. Dimensions:", tempImg.naturalWidth, tempImg.naturalHeight);
+                    const canvasWidth = canvasOriginal.width; const canvasHeight = canvasOriginal.height;
+                    ctxOriginal.clearRect(0, 0, canvasWidth, canvasHeight); ctxWasm.clearRect(0, 0, canvasWidth, canvasHeight);
                     let drawWidth, drawHeight, offsetX, offsetY;
-                    const imgAspect = tempImg.naturalWidth / tempImg.naturalHeight;
-                    const canvasAspect = canvasWidth / canvasHeight;
-                    if (imgAspect > canvasAspect) {
-                        drawWidth = canvasWidth; drawHeight = canvasWidth / imgAspect; offsetX = 0; offsetY = (canvasHeight - drawHeight) / 2;
-                    } else {
-                        drawHeight = canvasHeight; drawWidth = canvasHeight * imgAspect; offsetY = 0; offsetX = (canvasWidth - drawWidth) / 2;
-                    }
+                    const imgAspect = tempImg.naturalWidth / tempImg.naturalHeight; const canvasAspect = canvasWidth / canvasHeight;
+                    if (imgAspect > canvasAspect) { drawWidth = canvasWidth; drawHeight = canvasWidth / imgAspect; offsetX = 0; offsetY = (canvasHeight - drawHeight) / 2; } else { drawHeight = canvasHeight; drawWidth = canvasHeight * imgAspect; offsetY = 0; offsetX = (canvasWidth - drawWidth) / 2; }
                     ctxOriginal.drawImage(tempImg, offsetX, offsetY, drawWidth, drawHeight);
-
                     try {
                         originalImageData = ctxOriginal.getImageData(0, 0, canvasWidth, canvasHeight);
                          ctxWasm.putImageData(originalImageData, 0, 0);
-
-                         if (wasmReady) {
-                            processButton.disabled = false;
-                            status.textContent = "Ready to process.";
-                         } else {
-                            status.textContent = "Image loaded, waiting for Wasm...";
-                         }
-                    } catch(e) {
-                         console.error("Error getting/putting image data (maybe canvas tainted?):", e);
-                         status.textContent = "Error processing image data.";
-                         originalImageData = null;
-                    }
+                         if (wasmReady) { processButton.disabled = false; status.textContent = "Ready to process."; } else { status.textContent = "Image loaded, waiting for Wasm..."; }
+                    } catch(e) { console.error("Error getting/putting image data:", e); status.textContent = "Error processing image data."; originalImageData = null; }
                 };
                 tempImg.onerror = function() { status.textContent = "Error: Could not decode image data."; console.error("Error decoding image from data URL"); originalImageData = null; };
                 tempImg.src = e.target.result;
@@ -199,32 +168,15 @@
         dropZone.addEventListener('dragleave', (event) => { event.stopPropagation(); event.preventDefault(); dropZone.classList.remove('dragover'); });
         dropZone.addEventListener('drop', (event) => { event.stopPropagation(); event.preventDefault(); dropZone.classList.remove('dragover'); const files = event.dataTransfer.files; if (files && files[0]) { loadImageFromFile(files[0]); } else { status.textContent = "Error: No valid file dropped."; } });
 
-        // Wasm Processing Button
+
+        // Wasm Processing Button - Updated to call the pthread function
         processButton.addEventListener('click', () => {
-            // Add detailed checks inside the click handler too
-            console.log("--- Process Button Clicked ---");
-            console.log("Checking Module components before processing:");
-            console.log("  wasmReady flag:", wasmReady);
-            console.log("  originalImageData exists:", !!originalImageData);
-            console.log("  Module exists:", !!Module);
-            console.log("  Module._malloc exists:", !!(Module && Module._malloc));
-            console.log("  Module._free exists:", !!(Module && Module._free));
-            console.log("  Module.HEAPU8 exists:", !!(Module && Module.HEAPU8));
-            console.log("  Module.HEAPU8.buffer exists:", !!(Module && Module.HEAPU8 && Module.HEAPU8.buffer));
+            console.log("--- Process Button Clicked (Pthread) ---");
+             if (!wasmReady || !wasm_apply_grayscale_pthread) { status.textContent = 'Wasm functions not ready.'; console.error("Wasm functions not ready."); return; }
+             if (!originalImageData) { status.textContent = 'Image Data not ready.'; console.error("originalImageData not ready."); return; }
 
-            if (!wasmReady || !wasm_apply_grayscale) {
-                 status.textContent = 'Wasm functions not ready (wasmReady=' + wasmReady + ').';
-                 console.error("Wasm functions not ready.");
-                 return;
-            }
-            if (!originalImageData) {
-                status.textContent = 'Image Data not ready.';
-                 console.error("originalImageData not ready.");
-                return;
-            }
-
-            status.textContent = 'Processing...';
-            processButton.disabled = true; // Disable during processing
+            status.textContent = 'Processing with Pthreads...';
+            processButton.disabled = true;
 
             const imageData = originalImageData;
             const width = imageData.width;
@@ -233,32 +185,28 @@
             const dataSize = pixelData.byteLength;
 
             let wasmBufferPtr = 0;
+            let processingStartTime = performance.now(); // Start timer
+
             try {
-                // Refined check focusing on necessary components for this operation
                 if (!Module || !Module._malloc || !Module._free || !Module.HEAPU8 || !Module.HEAPU8.buffer ) {
-                     // Throw the specific error based on prior console logs
-                     throw new Error("Wasm runtime components (_malloc/_free/HEAPU8.buffer) not available when needed.");
+                     throw new Error("Wasm runtime components not available when needed.");
                  }
 
-                 // 1. Allocate memory in Wasm heap
+                 // 1. Allocate memory
                  wasmBufferPtr = Module._malloc(dataSize);
                  if (!wasmBufferPtr) { throw new Error(`Module._malloc failed (returned 0). Needed ${dataSize} bytes.`); }
                  console.log(`Allocated ${dataSize} bytes at address ${wasmBufferPtr}`);
 
-                 // --- Get heap view using HEAPU8's buffer ---
-                 const wasmHeapView = new Uint8Array(Module.HEAPU8.buffer); // Use HEAPU8's buffer
-                 console.log(`Wasm heap view created. Length: ${wasmHeapView.length}`);
-
-                 // 2. Copy pixel data (Bounds check added)
-                 if (wasmBufferPtr + dataSize > wasmHeapView.length) {
-                      throw new Error(`Wasm memory allocation range [${wasmBufferPtr}...${wasmBufferPtr + dataSize-1}] exceeds heap size (${wasmHeapView.length}).`);
-                 }
+                 // 2. Copy data to Wasm Heap
+                 const wasmHeapView = new Uint8Array(Module.HEAPU8.buffer);
+                 if (wasmBufferPtr + dataSize > wasmHeapView.length) { throw new Error(`Wasm memory allocation range exceeds heap size.`); }
                  wasmHeapView.set(pixelData, wasmBufferPtr);
                  console.log("Copied pixelData to wasmHeapView.");
 
-                 // 3. Call Wasm function
-                 wasm_apply_grayscale(wasmBufferPtr, width, height);
-                 console.log("Wasm function apply_grayscale executed.");
+                 // 3. Call the Wasm PTHREAD function!
+                 console.log(`Calling apply_grayscale_pthread with ${numThreads} threads.`);
+                 wasm_apply_grayscale_pthread(wasmBufferPtr, width, height, numThreads); // Pass numThreads
+                 console.log("Wasm function apply_grayscale_pthread finished.");
 
                  // 4. Copy modified data back
                  const resultPixelData = new Uint8ClampedArray(dataSize);
@@ -269,27 +217,27 @@
                  // 5. Display result
                  const resultImageData = new ImageData(resultPixelData, width, height);
                  ctxWasm.putImageData(resultImageData, 0, 0);
-                 status.textContent = 'Processing complete.';
+
+                 let processingEndTime = performance.now(); // End timer
+                 status.textContent = `Processing complete (${(processingEndTime - processingStartTime).toFixed(1)} ms).`;
+                 console.log(`Processing took ${(processingEndTime - processingStartTime).toFixed(1)} ms`);
 
             } catch (e) {
-                console.error("(index):290 Error during Wasm processing or memory operation:", e); // Match line
+                console.error("Error during Wasm processing or memory operation:", e);
                 status.textContent = `Error during Wasm processing: ${e.message}`;
             } finally {
                  // 6. Free memory
                  if (wasmBufferPtr && Module && Module._free) {
                      console.log(`Freeing memory at address ${wasmBufferPtr}`);
                      Module._free(wasmBufferPtr);
-                 } else if (wasmBufferPtr) {
-                     console.warn("Could not free Wasm memory - Module._free might be missing or Module object lost?");
-                 }
-                 // Re-enable button only if wasm is still considered ready
-                 processButton.disabled = !wasmReady;
+                 } else if (wasmBufferPtr) { console.warn("Could not free Wasm memory."); }
+                 processButton.disabled = !wasmReady; // Re-enable button
             }
-            console.log("--- Process Button Click Finished ---");
+            console.log("--- Process Button Click Finished (Pthread) ---");
         });
 
     </script>
     <!-- Load Emscripten Glue Code AFTER defining Module -->
-    <script src="image.js"></script>
+    <script src="image.js"></script> <!-- This JS file is now built with -pthread -->
 </body>
 </html>
