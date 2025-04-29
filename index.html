@@ -1,87 +1,295 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebAssembly Simple Example</title>
+    <title>Wasm Image Grayscale (User Input)</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; }
-        input, button { padding: 8px; margin: 5px; }
-        #output { margin-top: 15px; font-weight: bold; }
+        body { font-family: sans-serif; padding: 1em; }
+        .container { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+        .canvas-area { text-align: center; }
+        canvas { border: 1px solid black; display: block; margin-top: 5px; }
+        #dropZone {
+            border: 3px dashed #ccc;
+            padding: 20px;
+            margin-bottom: 15px;
+            text-align: center;
+            color: #777;
+            transition: background-color 0.2s ease;
+        }
+        #dropZone.dragover {
+            background-color: #e0e0e0;
+            border-color: #aaa;
+        }
+        .controls { margin-top: 15px; }
+        /* Hide default file input, style label instead */
+        input[type="file"] { display: none; }
+        label.file-button {
+            display: inline-block;
+            padding: 8px 15px;
+            background-color: #007bff;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        label.file-button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+
     </style>
 </head>
 <body>
-    <h1>WebAssembly C Function Call</h1>
+    <h1>Image Grayscale with WebAssembly</h1>
 
-    <input type="number" id="num1" value="10">
-    <input type="number" id="num2" value="5">
-    <br>
-    <button id="addButton">Add (Wasm)</button>
-    <button id="subtractButton">Subtract (Wasm)</button>
+    <div id="dropZone">
+        <p>Drag & Drop an image here, or use the button below.</p>
+    </div>
 
-    <div id="output">Result will appear here...</div>
+    <div class="controls">
+        <label for="fileInput" class="file-button">Select Image File</label>
+        <input type="file" id="fileInput" accept="image/*"> <!-- Accept only image types -->
+        <button id="processButton" disabled>Apply Grayscale (Wasm)</button>
+        <p id="status">Select or drop an image to begin.</p>
+    </div>
 
-    <!-- DEFINE Module FIRST -->
+    <div class="container">
+        <div class="canvas-area">
+            <h2>Original</h2>
+            <canvas id="canvasOriginal" width="300" height="200"></canvas>
+        </div>
+        <div class="canvas-area">
+            <h2>Grayscale (Wasm)</h2>
+            <canvas id="canvasWasm" width="300" height="200"></canvas>
+        </div>
+    </div>
+
+
     <script>
-        const num1Input = document.getElementById('num1');
-        const num2Input = document.getElementById('num2');
-        const addButton = document.getElementById('addButton');
-        const subtractButton = document.getElementById('subtractButton');
-        const outputDiv = document.getElementById('output');
+        const canvasOriginal = document.getElementById('canvasOriginal');
+        const ctxOriginal = canvasOriginal.getContext('2d');
+        const canvasWasm = document.getElementById('canvasWasm');
+        const ctxWasm = canvasWasm.getContext('2d');
+        const processButton = document.getElementById('processButton');
+        const status = document.getElementById('status');
+        const fileInput = document.getElementById('fileInput');
+        const dropZone = document.getElementById('dropZone');
 
-        let wasmAdd, wasmSubtract; // To hold our wrapped Wasm functions
+        let wasm_apply_grayscale;
+        let originalImageData; // To store pixel data from the loaded image
+        let wasmReady = false;
 
-        // Define the Module object *before* loading math.js
-        // Emscripten's glue code will look for this object.
+         // --- Emscripten Module Setup (Define BEFORE loading image.js) ---
         var Module = {
             onRuntimeInitialized: function() {
-                console.log('Wasm Runtime Initialized!');
+                console.log('(index):82 Wasm Runtime Initialized!'); // Match console line number roughly
+                try {
+                    wasm_apply_grayscale = Module.cwrap(
+                        'apply_grayscale', // C function name
+                        null,              // Return type (void)
+                        ['number', 'number', 'number'] // Args: ptr, width, height
+                    );
 
-                // Use cwrap to create easy-to-use JavaScript wrappers
-                wasmAdd = Module.cwrap('add', 'number', ['number', 'number']);
-                wasmSubtract = Module.cwrap('subtract', 'number', ['number', 'number']);
+                    // *** Add check right after initialization ***
+                    console.log("Checking Module components immediately after init:");
+                    console.log("  Module._malloc exists:", !!Module._malloc);
+                    console.log("  Module._free exists:", !!Module._free);
+                    console.log("  Module.HEAPU8 exists:", !!Module.HEAPU8);
+                    console.log("  Module.HEAPU8.buffer exists:", !!(Module.HEAPU8 && Module.HEAPU8.buffer));
+                    // console.log("  Module.wasmMemory exists:", !!Module.wasmMemory); // Keep commented unless needed
+                    // console.log("  Module.wasmMemory.buffer exists:", !!(Module.wasmMemory && Module.wasmMemory.buffer)); // Keep commented unless needed
 
-                // Enable buttons now that Wasm functions are ready
-                addButton.disabled = false;
-                subtractButton.disabled = false;
-                outputDiv.textContent = 'Wasm Ready! Enter numbers and click a button.';
+                    if (!Module._malloc || !Module._free || !Module.HEAPU8 || !Module.HEAPU8.buffer) {
+                         console.error("FATAL: Core Module components missing immediately after init!");
+                         status.textContent = "Error: Wasm initialization incomplete.";
+                         wasmReady = false; // Ensure it stays false
+                         return; // Stop further setup
+                    }
+
+                    wasmReady = true;
+                    console.log("Wasm components look OK after init.");
+
+                    // Check if an image was already loaded before Wasm was ready
+                    if (originalImageData) {
+                        processButton.disabled = false;
+                        status.textContent = "Ready to process.";
+                    } else {
+                        status.textContent = "Wasm ready. Select or drop an image.";
+                    }
+                } catch (initError) {
+                     console.error("Error during Wasm initialization or cwrap:", initError);
+                     status.textContent = "Error initializing Wasm module.";
+                     wasmReady = false;
+                }
+            },
+             // Optional: Add error handling for module loading itself
+            printErr: function(text) {
+                 console.error("Emscripten printErr:", text);
+                 // Update status only if it's a critical loading error maybe
+                 // status.textContent = "Error loading Wasm: " + text;
+            },
+            setStatus: function(text) {
+                 // You could potentially hook into Emscripten's status updates here
+                 // console.log("Emscripten setStatus:", text);
+                 if (text.includes("downloading data") || text.includes("prepare")) {
+                     status.textContent = "Initializing Wasm (" + text + ")...";
+                 }
             }
-            // You can add other Module customization options here if needed
-            // e.g., preRun: [], postRun: [], etc.
         };
 
-        // --- Event Listeners (can be defined here or after loading math.js) ---
-         addButton.addEventListener('click', () => {
-            if (!wasmAdd) { // Check if function is ready
-                outputDiv.textContent = 'Wasm function not ready yet.';
+        // --- Core Image Loading Logic ---
+        function loadImageFromFile(file) {
+            if (!file || !file.type.startsWith('image/')) {
+                status.textContent = "Error: Please select an image file.";
+                console.error("Invalid file type selected:", file ? file.type : 'none');
                 return;
             }
-            const num1 = parseInt(num1Input.value, 10);
-            const num2 = parseInt(num2Input.value, 10);
-            const result = wasmAdd(num1, num2); // Call the Wasm function!
-            outputDiv.textContent = `Wasm Add Result: ${num1} + ${num2} = ${result}`;
-        });
 
-        subtractButton.addEventListener('click', () => {
-             if (!wasmSubtract) { // Check if function is ready
-                outputDiv.textContent = 'Wasm function not ready yet.';
+            status.textContent = "Loading image...";
+            originalImageData = null; // Reset previous data
+            processButton.disabled = true; // Disable while loading new image
+
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                const tempImg = new Image();
+                tempImg.onload = function() {
+                    // Image successfully decoded by the browser
+                    console.log('(index):120 Image decoded. Dimensions:', tempImg.naturalWidth, tempImg.naturalHeight); // Match console line
+                    status.textContent = "Image loaded.";
+
+                    const canvasWidth = canvasOriginal.width;
+                    const canvasHeight = canvasOriginal.height;
+                    ctxOriginal.clearRect(0, 0, canvasWidth, canvasHeight);
+                    ctxWasm.clearRect(0, 0, canvasWidth, canvasHeight);
+                    let drawWidth, drawHeight, offsetX, offsetY;
+                    const imgAspect = tempImg.naturalWidth / tempImg.naturalHeight;
+                    const canvasAspect = canvasWidth / canvasHeight;
+                    if (imgAspect > canvasAspect) {
+                        drawWidth = canvasWidth; drawHeight = canvasWidth / imgAspect; offsetX = 0; offsetY = (canvasHeight - drawHeight) / 2;
+                    } else {
+                        drawHeight = canvasHeight; drawWidth = canvasHeight * imgAspect; offsetY = 0; offsetX = (canvasWidth - drawWidth) / 2;
+                    }
+                    ctxOriginal.drawImage(tempImg, offsetX, offsetY, drawWidth, drawHeight);
+
+                    try {
+                        originalImageData = ctxOriginal.getImageData(0, 0, canvasWidth, canvasHeight);
+                         ctxWasm.putImageData(originalImageData, 0, 0);
+
+                         if (wasmReady) {
+                            processButton.disabled = false;
+                            status.textContent = "Ready to process.";
+                         } else {
+                            status.textContent = "Image loaded, waiting for Wasm...";
+                         }
+                    } catch(e) {
+                         console.error("Error getting/putting image data (maybe canvas tainted?):", e);
+                         status.textContent = "Error processing image data.";
+                         originalImageData = null;
+                    }
+                };
+                tempImg.onerror = function() { status.textContent = "Error: Could not decode image data."; console.error("Error decoding image from data URL"); originalImageData = null; };
+                tempImg.src = e.target.result;
+            };
+            reader.onerror = function() { status.textContent = "Error: Could not read file."; console.error("FileReader error"); originalImageData = null; };
+            reader.readAsDataURL(file);
+        }
+
+
+        // --- Event Listeners ---
+        fileInput.addEventListener('change', (event) => { if (event.target.files && event.target.files[0]) { loadImageFromFile(event.target.files[0]); } event.target.value = null; });
+        dropZone.addEventListener('dragover', (event) => { event.stopPropagation(); event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', (event) => { event.stopPropagation(); event.preventDefault(); dropZone.classList.remove('dragover'); });
+        dropZone.addEventListener('drop', (event) => { event.stopPropagation(); event.preventDefault(); dropZone.classList.remove('dragover'); const files = event.dataTransfer.files; if (files && files[0]) { loadImageFromFile(files[0]); } else { status.textContent = "Error: No valid file dropped."; } });
+
+        // Wasm Processing Button
+        processButton.addEventListener('click', () => {
+            // Add detailed checks inside the click handler too
+            console.log("--- Process Button Clicked ---");
+            console.log("Checking Module components before processing:");
+            console.log("  wasmReady flag:", wasmReady);
+            console.log("  originalImageData exists:", !!originalImageData);
+            console.log("  Module exists:", !!Module);
+            console.log("  Module._malloc exists:", !!(Module && Module._malloc));
+            console.log("  Module._free exists:", !!(Module && Module._free));
+            console.log("  Module.HEAPU8 exists:", !!(Module && Module.HEAPU8));
+            console.log("  Module.HEAPU8.buffer exists:", !!(Module && Module.HEAPU8 && Module.HEAPU8.buffer));
+
+            if (!wasmReady || !wasm_apply_grayscale) {
+                 status.textContent = 'Wasm functions not ready (wasmReady=' + wasmReady + ').';
+                 console.error("Wasm functions not ready.");
+                 return;
+            }
+            if (!originalImageData) {
+                status.textContent = 'Image Data not ready.';
+                 console.error("originalImageData not ready.");
                 return;
             }
-            const num1 = parseInt(num1Input.value, 10);
-            const num2 = parseInt(num2Input.value, 10);
-            const result = wasmSubtract(num1, num2); // Call the Wasm function!
-            outputDiv.textContent = `Wasm Subtract Result: ${num1} - ${num2} = ${result}`;
-        });
 
-         // Disable buttons initially until Wasm is loaded and runtime initialized
-        addButton.disabled = true;
-        subtractButton.disabled = true;
+            status.textContent = 'Processing...';
+            processButton.disabled = true; // Disable during processing
+
+            const imageData = originalImageData;
+            const width = imageData.width;
+            const height = imageData.height;
+            const pixelData = imageData.data;
+            const dataSize = pixelData.byteLength;
+
+            let wasmBufferPtr = 0;
+            try {
+                // Refined check focusing on necessary components for this operation
+                if (!Module || !Module._malloc || !Module._free || !Module.HEAPU8 || !Module.HEAPU8.buffer ) {
+                     // Throw the specific error based on prior console logs
+                     throw new Error("Wasm runtime components (_malloc/_free/HEAPU8.buffer) not available when needed.");
+                 }
+
+                 // 1. Allocate memory in Wasm heap
+                 wasmBufferPtr = Module._malloc(dataSize);
+                 if (!wasmBufferPtr) { throw new Error(`Module._malloc failed (returned 0). Needed ${dataSize} bytes.`); }
+                 console.log(`Allocated ${dataSize} bytes at address ${wasmBufferPtr}`);
+
+                 // --- Get heap view using HEAPU8's buffer ---
+                 const wasmHeapView = new Uint8Array(Module.HEAPU8.buffer); // Use HEAPU8's buffer
+                 console.log(`Wasm heap view created. Length: ${wasmHeapView.length}`);
+
+                 // 2. Copy pixel data (Bounds check added)
+                 if (wasmBufferPtr + dataSize > wasmHeapView.length) {
+                      throw new Error(`Wasm memory allocation range [${wasmBufferPtr}...${wasmBufferPtr + dataSize-1}] exceeds heap size (${wasmHeapView.length}).`);
+                 }
+                 wasmHeapView.set(pixelData, wasmBufferPtr);
+                 console.log("Copied pixelData to wasmHeapView.");
+
+                 // 3. Call Wasm function
+                 wasm_apply_grayscale(wasmBufferPtr, width, height);
+                 console.log("Wasm function apply_grayscale executed.");
+
+                 // 4. Copy modified data back
+                 const resultPixelData = new Uint8ClampedArray(dataSize);
+                 const modifiedDataView = wasmHeapView.subarray(wasmBufferPtr, wasmBufferPtr + dataSize);
+                 resultPixelData.set(modifiedDataView);
+                 console.log("Copied modified data back from wasmHeapView.");
+
+                 // 5. Display result
+                 const resultImageData = new ImageData(resultPixelData, width, height);
+                 ctxWasm.putImageData(resultImageData, 0, 0);
+                 status.textContent = 'Processing complete.';
+
+            } catch (e) {
+                console.error("(index):290 Error during Wasm processing or memory operation:", e); // Match line
+                status.textContent = `Error during Wasm processing: ${e.message}`;
+            } finally {
+                 // 6. Free memory
+                 if (wasmBufferPtr && Module && Module._free) {
+                     console.log(`Freeing memory at address ${wasmBufferPtr}`);
+                     Module._free(wasmBufferPtr);
+                 } else if (wasmBufferPtr) {
+                     console.warn("Could not free Wasm memory - Module._free might be missing or Module object lost?");
+                 }
+                 // Re-enable button only if wasm is still considered ready
+                 processButton.disabled = !wasmReady;
+            }
+            console.log("--- Process Button Click Finished ---");
+        });
 
     </script>
-
-    <!-- THEN load the Emscripten JS glue code -->
-    <!-- It will find the Module object defined above -->
-    <script src="math.js"></script>
-
+    <!-- Load Emscripten Glue Code AFTER defining Module -->
+    <script src="image.js"></script>
 </body>
 </html>
